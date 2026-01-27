@@ -15,10 +15,12 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '18'
+          # cache는 package-lock.json이 있을 때만 작동하므로 선택적으로 설정
           cache: 'npm'
           cache-dependency-path: |
             backend/package-lock.json
             frontend/package-lock.json
+        continue-on-error: true  # 캐시 실패해도 계속 진행
 
       # 백엔드 빌드
       - name: Install backend dependencies
