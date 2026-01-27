@@ -88,11 +88,19 @@ jobs:
           port: ${{ secrets.DEPLOY_PORT || 22 }}
           script: |
             DEPLOY_PATH="${{ secrets.DEPLOY_PATH || '/var/www/game-platform' }}"
-            cd $DEPLOY_PATH
+            cd $DEPLOY_PATH/backend
             
             # shared 폴더를 백엔드에 복사
-            cd backend
             node copy-shared.js || true
+            
+            # .env 파일 생성 (GitHub Secrets에서 환경 변수 사용)
+            cat > .env << EOF
+            PORT=${{ secrets.PORT || '3002' }}
+            NODE_ENV=production
+            MONGODB_URI=${{ secrets.MONGODB_URI }}
+            JWT_SECRET=${{ secrets.JWT_SECRET }}
+            FRONTEND_URL=${{ secrets.FRONTEND_URL || '' }}
+            EOF
             
             # 백엔드 의존성 설치 (production만)
             npm ci --only=production
