@@ -26,7 +26,11 @@ jobs:
       - name: Install backend dependencies
         run: |
           cd backend
-          npm ci
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
 
       - name: Build backend
         run: |
@@ -37,7 +41,11 @@ jobs:
       - name: Install frontend dependencies
         run: |
           cd frontend
-          npm ci
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
 
       - name: Build frontend
         env:
