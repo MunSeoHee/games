@@ -43,6 +43,12 @@ Thumbs.db
 *.temp
 .cache/
 
+# Temporary scripts
+fix-*.ps1
+fix-*.sh
+remove-*.ps1
+remove-*.sh
+
 # PM2
 .pm2/
 
