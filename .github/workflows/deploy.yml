@@ -27,7 +27,7 @@ jobs:
         run: |
           cd backend
           if [ -f package-lock.json ]; then
-            npm ci
+            npm ci || npm install
           else
             npm install
           fi
@@ -42,7 +42,7 @@ jobs:
         run: |
           cd frontend
           if [ -f package-lock.json ]; then
-            npm ci
+            npm ci || npm install
           else
             npm install
           fi
