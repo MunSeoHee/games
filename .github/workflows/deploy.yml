@@ -89,6 +89,73 @@ jobs:
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           port: ${{ secrets.DEPLOY_PORT || 22 }}
           script: |
+            # PATH 설정 (nvm 사용 시)
+            export NVM_DIR="$HOME/.nvm"
+            [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+            [ -s "/usr/local/nvm/nvm.sh" ] && \. "/usr/local/nvm/nvm.sh"
+            
+            # nvm으로 설치된 Node.js 경로 추가
+            if [ -d "$HOME/.nvm/versions/node" ]; then
+              NODE_VERSION=$(ls -t "$HOME/.nvm/versions/node" | head -1)
+              export PATH="$PATH:$HOME/.nvm/versions/node/$NODE_VERSION/bin"
+            fi
+            
+            # Node.js 경로 확인 및 PATH 추가
+            if command -v node >/dev/null 2>&1; then
+              echo "✓ Node.js found: $(which node) ($(node --version))"
+            elif [ -f "/usr/bin/node" ]; then
+              export PATH="/usr/bin:$PATH"
+              echo "✓ Node.js found: /usr/bin/node"
+            elif [ -f "/usr/local/bin/node" ]; then
+              export PATH="/usr/local/bin:$PATH"
+              echo "✓ Node.js found: /usr/local/bin/node"
+            else
+              echo "⚠ Node.js not found. Please install Node.js first."
+              exit 1
+            fi
+            
+            # npm 경로 확인
+            if ! command -v npm >/dev/null 2>&1; then
+              echo "⚠ npm not found. Checking common locations..."
+              if [ -f "/usr/bin/npm" ]; then
+                export PATH="/usr/bin:$PATH"
+              elif [ -f "/usr/local/bin/npm" ]; then
+                export PATH="/usr/local/bin:$PATH"
+              else
+                echo "⚠ npm not found. Please install npm first."
+                exit 1
+              fi
+            fi
+            
+            # PM2 경로 확인
+            if command -v pm2 >/dev/null 2>&1; then
+              echo "✓ PM2 found: $(which pm2)"
+            else
+              echo "⚠ pm2 not found. Checking common locations..."
+              # nvm으로 설치된 PM2 경로 확인
+              if [ -d "$HOME/.nvm/versions/node" ]; then
+                NODE_VERSION=$(ls -t "$HOME/.nvm/versions/node" | head -1)
+                PM2_PATH="$HOME/.nvm/versions/node/$NODE_VERSION/lib/node_modules/pm2/bin/pm2"
+                if [ -f "$PM2_PATH" ]; then
+                  export PATH="$PATH:$HOME/.nvm/versions/node/$NODE_VERSION/bin"
+                  echo "✓ PM2 found: $PM2_PATH"
+                fi
+              fi
+              
+              if ! command -v pm2 >/dev/null 2>&1; then
+                if [ -f "/usr/bin/pm2" ]; then
+                  export PATH="/usr/bin:$PATH"
+                elif [ -f "/usr/local/bin/pm2" ]; then
+                  export PATH="/usr/local/bin:$PATH"
+                elif [ -f "$HOME/.npm-global/bin/pm2" ]; then
+                  export PATH="$HOME/.npm-global/bin:$PATH"
+                else
+                  echo "⚠ pm2 not found. Installing pm2 globally..."
+                  npm install -g pm2 || echo "⚠ Failed to install pm2"
+                fi
+              fi
+            fi
+            
             DEPLOY_PATH="${{ secrets.DEPLOY_PATH || '/var/www/game-platform' }}"
             cd $DEPLOY_PATH/backend
             
@@ -105,7 +172,7 @@ jobs:
             EOF
             
             # 백엔드 의존성 설치 (production만)
-            npm ci --only=production
+            npm install --only=production || npm install --production
             
             # PM2로 백엔드 재시작
             pm2 restart game-backend || pm2 start dist/index.js --name "game-backend" --env production
