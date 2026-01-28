@@ -414,22 +414,6 @@ export default function GameRoom() {
                     </div>
                   </div>
                 )}
-                {/* SeotdaGame 컴포넌트는 PLAYING 상태일 때만 렌더링 */}
-                {room.gameType === GameType.SEOTDA && socket && room.status === GameRoomStatus.PLAYING && (
-                  <SeotdaGame roomId={roomId!} socket={socket} room={{
-                    id: room._id,
-                    hostId: typeof room.hostId === 'string' ? room.hostId : String(room.hostId),
-                    players: room.players.map(p => ({
-                      userId: String(p.userId),
-                      username: p.username,
-                      money: p.money,
-                      isReady: p.isReady
-                    })),
-                    gameType: room.gameType,
-                    status: room.status,
-                    createdAt: new Date()
-                  }} gameResults={gameResults} onGameResultsChange={setGameResults} />
-                )}
               </div>
             ) : room.status === GameRoomStatus.PLAYING && room.gameType === GameType.SEOTDA ? (
               socket ? (
