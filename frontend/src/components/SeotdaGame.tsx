@@ -368,9 +368,9 @@ export default function SeotdaGame({ roomId, socket, room }: SeotdaGameProps) {
               판돈: {formatSeotdaMoney(gameResults.pot || 0)}
             </div>
             {(() => {
-              const isHost = typeof room.hostId === 'object' 
-                ? room.hostId.username === user?.username 
-                : room.hostId.toString() === user?.id;
+              const isHost = typeof room.hostId === 'object' && room.hostId !== null
+                ? (room.hostId as { username: string }).username === user?.username 
+                : String(room.hostId) === user?.id;
               return isHost && (
                 <div className="mt-4">
                   <button
@@ -430,7 +430,6 @@ export default function SeotdaGame({ roomId, socket, room }: SeotdaGameProps) {
       <div className="grid grid-cols-2 gap-4 mb-6">
         {room.players.map((player: Player, idx: number) => {
           const cards = revealedCards[player.userId] || [];
-          const isDealer = idx === gameState.dealerIndex;
           const isCurrentPlayer = idx === gameState.currentPlayerIndex;
           const playerUserId = String(player.userId);
           const isCurrentUser = user && (playerUserId === user.id || player.username === user.username);
@@ -501,7 +500,7 @@ export default function SeotdaGame({ roomId, socket, room }: SeotdaGameProps) {
                 if (roundBets.length > 0 || currentRoundBet > 0) {
                   return (
                     <div className="text-xs text-gray-600 mb-2 space-y-0.5">
-                      {roundBets.map((bet, idx) => (
+                      {roundBets.map((bet: number, idx: number) => (
                         <div key={idx} className="text-blue-600">
                           {idx + 1}라운드: {formatSeotdaMoney(bet)}
                         </div>
