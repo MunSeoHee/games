@@ -620,9 +620,9 @@ export default function SeotdaGame({ roomId, socket, room }: SeotdaGameProps) {
             판돈: {formatSeotdaMoney(gameResults.pot || 0)}
           </div>
           {(() => {
-            const isHost = typeof room.hostId === 'object' 
-              ? room.hostId.username === user?.username 
-              : room.hostId.toString() === user?.id;
+            const isHost = typeof room.hostId === 'object' && room.hostId !== null
+              ? (room.hostId as { username: string }).username === user?.username 
+              : String(room.hostId) === user?.id;
             return isHost && (
               <div className="mt-4">
                 <button
