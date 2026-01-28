@@ -69,14 +69,58 @@ jobs:
           script: |
             DEPLOY_PATH="${{ secrets.DEPLOY_PATH || '/var/www/game-platform' }}"
             FRONTEND_PATH="$DEPLOY_PATH/frontend"
-            echo "기존 프론트엔드 디렉토리 삭제: $FRONTEND_PATH"
+            CURRENT_USER=$(whoami)
+            
+            echo "=== 기존 프론트엔드 디렉토리 완전 삭제 ==="
+            echo "경로: $FRONTEND_PATH"
+            echo "현재 사용자: $CURRENT_USER"
+            
+            # 디렉토리가 있으면 완전히 삭제
             if [ -d "$FRONTEND_PATH" ]; then
-              sudo rm -rf "$FRONTEND_PATH"/* || rm -rf "$FRONTEND_PATH"/* || true
-              echo "✓ 기존 파일 삭제 완료"
+              echo "기존 디렉토리 발견, 삭제 중..."
+              echo "삭제 전 파일 개수:"
+              find "$FRONTEND_PATH" -type f | wc -l || echo "0"
+              
+              # 권한 문제로 삭제가 안 될 수 있으므로 여러 방법 시도
+              sudo chown -R "$CURRENT_USER:$CURRENT_USER" "$FRONTEND_PATH" 2>/dev/null || true
+              sudo chmod -R 777 "$FRONTEND_PATH" 2>/dev/null || true
+              
+              # 완전 삭제
+              sudo rm -rf "$FRONTEND_PATH" || rm -rf "$FRONTEND_PATH" || true
+              
+              # 삭제 확인
+              if [ -d "$FRONTEND_PATH" ]; then
+                echo "⚠ 경고: 디렉토리가 완전히 삭제되지 않았습니다. 강제 삭제 시도..."
+                sudo rm -rf "$FRONTEND_PATH"/* 2>/dev/null || true
+                sudo rmdir "$FRONTEND_PATH" 2>/dev/null || true
+              fi
+              
+              echo "✓ 기존 디렉토리 삭제 완료"
             else
-              echo "프론트엔드 디렉토리 생성: $FRONTEND_PATH"
-              sudo mkdir -p "$FRONTEND_PATH" || mkdir -p "$FRONTEND_PATH" || true
+              echo "기존 디렉토리가 없습니다 (정상)"
             fi
+            
+            # 디렉토리 재생성 및 권한 설정
+            echo "=== 프론트엔드 디렉토리 생성 ==="
+            sudo mkdir -p "$FRONTEND_PATH" || mkdir -p "$FRONTEND_PATH" || true
+            
+            # 현재 사용자에게 소유권 부여 (scp-action이 파일을 쓸 수 있도록)
+            echo "=== 디렉토리 권한 설정 ==="
+            sudo chown -R "$CURRENT_USER:$CURRENT_USER" "$FRONTEND_PATH" 2>/dev/null || \
+            sudo chown -R "$CURRENT_USER" "$FRONTEND_PATH" 2>/dev/null || true
+            
+            # 쓰기 권한 부여
+            sudo chmod -R 775 "$FRONTEND_PATH" 2>/dev/null || \
+            chmod -R 775 "$FRONTEND_PATH" 2>/dev/null || \
+            sudo chmod -R 755 "$FRONTEND_PATH" 2>/dev/null || \
+            chmod -R 755 "$FRONTEND_PATH" 2>/dev/null || true
+            
+            echo "=== 권한 설정 완료 ==="
+            ls -ld "$FRONTEND_PATH" || true
+            echo "디렉토리 내용 (비어있어야 함):"
+            ls -la "$FRONTEND_PATH" || true
+            echo "파일 개수:"
+            find "$FRONTEND_PATH" -type f 2>/dev/null | wc -l || echo "0"
 
       - name: Deploy frontend files
         uses: appleboy/scp-action@v0.1.7
@@ -88,6 +132,8 @@ jobs:
           source: "frontend/dist"
           target: ${{ secrets.DEPLOY_PATH || '/var/www/game-platform' }}/frontend
           strip_components: 1
+          overwrite: true
+          rm: false
 
       - name: Deploy shared folder
         uses: appleboy/scp-action@v0.1.7
@@ -239,13 +285,60 @@ jobs:
             fi
             
             # Nginx 설정 확인 및 업데이트
-            echo "=== Nginx 설정 확인 ==="
+            echo "=== Nginx 설정 확인 및 업데이트 ==="
             NGINX_CONFIG="/etc/nginx/sites-available/default"
+            NGINX_ENABLED="/etc/nginx/sites-enabled/default"
+            FRONTEND_PATH="$DEPLOY_PATH/frontend"
+            
+            # 설정 파일 찾기
             if [ -f "$NGINX_CONFIG" ]; then
-              echo "Nginx 설정 파일 확인: $NGINX_CONFIG"
-              echo "프론트엔드 root 경로 확인:"
-              sudo grep -n "root.*frontend\|alias.*frontend" "$NGINX_CONFIG" || echo "프론트엔드 경로를 찾을 수 없습니다"
+              CONFIG_FILE="$NGINX_CONFIG"
+            elif [ -f "$NGINX_ENABLED" ]; then
+              CONFIG_FILE="$NGINX_ENABLED"
+            else
+              CONFIG_FILE="/etc/nginx/nginx.conf"
             fi
+            
+            if [ -f "$CONFIG_FILE" ]; then
+              echo "Nginx 설정 파일: $CONFIG_FILE"
+              echo "=== 현재 프론트엔드 경로 확인 ==="
+              CURRENT_ROOT=$(sudo grep -E "^\s*root\s+" "$CONFIG_FILE" | grep -v "#" | head -1 | awk '{print $2}' | tr -d ';' || echo "")
+              if [ -n "$CURRENT_ROOT" ]; then
+                echo "현재 root 경로: $CURRENT_ROOT"
+                echo "새 배포 경로: $FRONTEND_PATH"
+                
+                # 경로가 다르면 업데이트
+                if [ "$CURRENT_ROOT" != "$FRONTEND_PATH" ]; then
+                  echo "⚠ 경로가 다릅니다. Nginx 설정 업데이트 중..."
+                  # 백업 생성
+                  sudo cp "$CONFIG_FILE" "$CONFIG_FILE.backup.$(date +%Y%m%d_%H%M%S)" || true
+                  
+                  # root 경로 업데이트
+                  sudo sed -i "s|root $CURRENT_ROOT|root $FRONTEND_PATH|g" "$CONFIG_FILE" || \
+                  sudo sed -i "s|root.*mygame|root $FRONTEND_PATH|g" "$CONFIG_FILE" || \
+                  echo "⚠ 자동 업데이트 실패. 수동으로 업데이트 필요: $CONFIG_FILE"
+                  
+                  echo "업데이트 후 설정 확인:"
+                  sudo grep -E "^\s*root\s+" "$CONFIG_FILE" | grep -v "#" || true
+                else
+                  echo "✓ 경로가 일치합니다"
+                fi
+              else
+                echo "⚠ root 경로를 찾을 수 없습니다"
+              fi
+            else
+              echo "⚠ Nginx 설정 파일을 찾을 수 없습니다"
+            fi
+            
+            # 실제 프론트엔드 파일 위치 확인
+            echo "=== 실제 프론트엔드 파일 위치 확인 ==="
+            for path in "/var/www/html" "/var/www/mygame" "/var/www/frontend" "/home/ubuntu/frontend" "/usr/share/nginx/html" "$FRONTEND_PATH"; do
+              if [ -d "$path" ]; then
+                echo "✓ 발견: $path"
+                echo "파일 개수: $(find "$path" -type f 2>/dev/null | wc -l)"
+                ls -la "$path" | head -5 || true
+              fi
+            done
             
             # Nginx 설정 테스트
             sudo nginx -t || echo "⚠ Nginx 설정 테스트 실패"
