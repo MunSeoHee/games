@@ -75,7 +75,8 @@ export default function SeotdaGame({ roomId, socket, room, gameResults: external
     if (!socket) return;
 
     socket.on('game:state', (data: any) => {
-      if (data.myCards) {
+      if (data.myCards && Array.isArray(data.myCards) && data.myCards.length > 0) {
+        console.log('game:state 이벤트: myCards 업데이트', data.myCards);
         setMyCards(data.myCards);
       }
       if (data.gameState) {
@@ -139,18 +140,7 @@ export default function SeotdaGame({ roomId, socket, room, gameResults: external
         // 두 번째 카드 지급 (비공개)
       } else if (data.action?.type === 'gusa-draw') {
         // 구사 무승부 - 재경기 시작
-        setSelectedCards([]);
-        setCardsSelected(false);
-        if (data.gameState) {
-          setGameState((prev) => ({
-            ...prev,
-            ...data.gameState,
-            phase: 'betting',
-            playerBettingStates: data.gameState.playerBettingStates || prev.playerBettingStates, // 베팅 상태 업데이트
-          }));
-        }
-        // 재경기 알림 표시
-        alert(data.action?.message || '구사로 인한 무승부! 재경기를 시작합니다.');
+        console.log('구사 재경기 시작:', data);
         
         // 재경기 시작 시 상태 초기화
         setSelectedCards([]);
@@ -159,16 +149,37 @@ export default function SeotdaGame({ roomId, socket, room, gameResults: external
         setRevealedCards({});
         setPartiallyRevealedCards({});
         
+        // myCards 설정 (data.myCards가 있으면 우선 사용, 없으면 playerCards에서 가져오기)
+        if (data.myCards && Array.isArray(data.myCards) && data.myCards.length > 0) {
+          console.log('구사 재경기: data.myCards에서 카드 설정:', data.myCards);
+          setMyCards(data.myCards);
+        } else if (data.gameState?.playerCards && user?.id) {
+          const myPlayerCards = data.gameState.playerCards[user.id] || data.gameState.playerCards[String(user.id)];
+          if (myPlayerCards && myPlayerCards.length > 0) {
+            console.log('구사 재경기: playerCards에서 카드 설정:', myPlayerCards);
+            setMyCards(myPlayerCards);
+          } else {
+            console.warn('구사 재경기: 카드를 찾을 수 없습니다', { userId: user?.id, playerCards: data.gameState.playerCards });
+            setMyCards([]);
+          }
+        } else {
+          console.warn('구사 재경기: 카드 데이터가 없습니다', data);
+          setMyCards([]);
+        }
+        
         // gameState 업데이트
         if (data.gameState) {
           setGameState((prev) => ({
             ...prev,
             ...data.gameState,
-            phase: data.gameState.phase || 'betting',
+            phase: data.gameState.phase || 'initial', // 재경기는 initial 페이즈부터 시작
+            playerBettingStates: data.gameState.playerBettingStates || prev.playerBettingStates,
+            playerCards: data.gameState.playerCards || prev.playerCards,
           }));
         }
         
-        // myCards는 game:state 이벤트에서 업데이트됨
+        // 재경기 알림 표시
+        alert(data.action?.message || '구사로 인한 무승부! 재경기를 시작합니다.');
       } else if (data.action?.type === 'showdown-start') {
         // 쇼다운 시작
         console.log('쇼다운 시작 이벤트 수신:', data);
@@ -477,7 +488,7 @@ export default function SeotdaGame({ roomId, socket, room, gameResults: external
             // 선택해야 하는 플레이어: 굵은 테두리
             borderClass = 'border-4 border-purple-500';
           } else if (isCurrentPlayer && gameState.phase !== 'initial' && gameState.phase !== 'showdown') {
-            // 일반 턴에서 현재 플레이어: 굵은 테두리
+            // 일반 턴에서 현재 플레이어: 굵은 테두리 (보라색)
             borderClass = 'border-4 border-purple-500';
           }
 
@@ -486,7 +497,7 @@ export default function SeotdaGame({ roomId, socket, room, gameResults: external
               key={player.userId}
               className={`rounded-lg p-4 ${
                 isCurrentUser 
-                  ? 'bg-purple-50' 
+                  ? 'bg-purple-100' 
                   : 'bg-gray-50'
               } ${borderClass}`}
             >
@@ -519,8 +530,30 @@ export default function SeotdaGame({ roomId, socket, room, gameResults: external
                 const playerBettingState = gameState.playerBettingStates?.[playerUserId] || gameState.playerBettingStates?.[player.userId];
                 const roundBets = playerBettingState?.roundBets || [];
                 const currentRoundBet = playerBettingState?.roundBet || 0;
+                const currentAction = playerBettingState?.action;
                 
-                if (roundBets.length > 0 || currentRoundBet > 0) {
+                // 베팅 액션을 한국어로 변환
+                const getActionLabel = (action?: string) => {
+                  switch (action) {
+                    case 'call': return '콜';
+                    case 'half': return '하프';
+                    case 'ddadang': return '따당';
+                    case 'check': return '체크';
+                    case 'bbing': return '삥';
+                    case 'allin': return '올인';
+                    case 'die': return '다이';
+                    case 'quarter': return '쿼터';
+                    case 'full': return '풀';
+                    default: return '';
+                  }
+                };
+                
+                // 베팅 라운드 중이거나 이전 라운드 배팅이 있으면 표시
+                const isBettingPhase = gameState.phase === 'betting' || gameState.phase === 'second-card';
+                const hasPreviousRounds = roundBets.length > 0;
+                const shouldShowCurrentRound = isBettingPhase || currentRoundBet > 0;
+                
+                if (hasPreviousRounds || shouldShowCurrentRound) {
                   return (
                     <div className="text-xs text-gray-600 mb-2 space-y-0.5">
                       {roundBets.map((bet: number, idx: number) => (
@@ -528,9 +561,14 @@ export default function SeotdaGame({ roomId, socket, room, gameResults: external
                           {idx + 1}라운드: {formatSeotdaMoney(bet)}
                         </div>
                       ))}
-                      {currentRoundBet > 0 && (
-                        <div className="text-blue-600 font-semibold">
-                          {gameState.bettingRound}라운드: {formatSeotdaMoney(currentRoundBet)}
+                      {shouldShowCurrentRound && (
+                        <div className="text-blue-600 font-semibold flex items-center gap-1">
+                          <span>{gameState.bettingRound}라운드: {formatSeotdaMoney(currentRoundBet)}</span>
+                          {currentAction && (
+                            <span className="px-1.5 py-0.5 text-xs bg-purple-100 text-purple-700 rounded">
+                              {getActionLabel(currentAction)}
+                            </span>
+                          )}
                         </div>
                       )}
                     </div>

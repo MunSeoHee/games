@@ -365,12 +365,16 @@ export const setupSocketIO = (io: Server) => {
             }
             gameState.gameData.playerSelectedRevealCard[userId] = selectedCard;
 
-            // 모든 플레이어에게 선택한 카드 공개 정보 전송
+            // 모든 살아있는 플레이어에게 선택한 카드 공개 정보 전송
             const partiallyRevealed: Record<string, Card> = {};
             room.players.forEach((player) => {
-              const selectedCard = gameState.gameData.playerSelectedRevealCard?.[player.userId.toString()];
-              if (selectedCard) {
-                partiallyRevealed[player.userId.toString()] = selectedCard;
+              const pUserId = player.userId.toString();
+              // 살아있는 플레이어만 확인
+              if (gameState.playerBettingStates[pUserId]?.isAlive !== false) {
+                const selectedCard = gameState.gameData.playerSelectedRevealCard?.[pUserId];
+                if (selectedCard) {
+                  partiallyRevealed[pUserId] = selectedCard;
+                }
               }
             });
 
@@ -384,10 +388,15 @@ export const setupSocketIO = (io: Server) => {
               timestamp: new Date(),
             });
 
-            // 모든 플레이어가 카드를 선택했는지 확인
-            const allSelected = room.players.every((player) => {
-              return gameState.gameData.playerSelectedRevealCard?.[player.userId.toString()] !== null &&
-                     gameState.gameData.playerSelectedRevealCard?.[player.userId.toString()] !== undefined;
+            // 모든 살아있는 플레이어가 카드를 선택했는지 확인
+            const alivePlayers = room.players.filter((player) => {
+              const pUserId = player.userId.toString();
+              return gameState.playerBettingStates[pUserId]?.isAlive !== false;
+            });
+            const allSelected = alivePlayers.every((player) => {
+              const pUserId = player.userId.toString();
+              const selectedCard = gameState.gameData.playerSelectedRevealCard?.[pUserId];
+              return selectedCard !== null && selectedCard !== undefined;
             });
 
             if (allSelected) {
@@ -959,19 +968,27 @@ export const setupSocketIO = (io: Server) => {
                   }
                 });
                 
-                // 새로운 덱 생성 및 카드 배분 (1장부터 시작)
+                // 새로운 덱 생성 및 카드 배분 (2장씩 배분)
                 const newDeck = createDeck();
                 gameState.gameData.deck = newDeck;
                 gameState.gameData.playerSelectedCards = {}; // 선택한 카드 초기화
+                gameState.gameData.playerSelectedRevealCard = {}; // 공개 카드 선택 초기화
+                // 살아있는 플레이어의 선택 상태를 null로 초기화
+                room.players.forEach((player) => {
+                  const pUserId = player.userId.toString();
+                  if (alivePlayerIds.has(pUserId)) {
+                    gameState.gameData.playerSelectedRevealCard[pUserId] = null;
+                  }
+                });
                 
-                // 살아있는 플레이어에게만 카드 1장 배분
+                // 살아있는 플레이어에게만 카드 2장씩 배분
                 const newPlayerCards: Record<string, Card[]> = {};
                 let cardIndex = 0;
                 room.players.forEach((player) => {
                   const pUserId = player.userId.toString();
                   if (alivePlayerIds.has(pUserId)) {
-                    newPlayerCards[pUserId] = [newDeck[cardIndex]];
-                    cardIndex++;
+                    newPlayerCards[pUserId] = [newDeck[cardIndex], newDeck[cardIndex + 1]];
+                    cardIndex += 2;
                   }
                 });
                 gameState.playerCards = newPlayerCards;
@@ -984,70 +1001,86 @@ export const setupSocketIO = (io: Server) => {
                   gameState.playerBettingStates
                 );
                 
-                // 각 플레이어에게 재경기 시작 알림
+                // 각 플레이어에게 재경기 시작 알림 (game:state 이벤트)
                 room.players.forEach((player) => {
                   const pUserId = player.userId.toString();
+                  if (!alivePlayerIds.has(pUserId)) {
+                    return; // 살아있지 않은 플레이어는 스킵
+                  }
+                  
                   const playerSocket = Array.from(io.sockets.sockets.values()).find(
                     (s: any) => s.userId === pUserId
                   );
-                  if (playerSocket && alivePlayerIds.has(pUserId)) {
+                  
+                  if (playerSocket) {
+                    const playerCards = newPlayerCards[pUserId] || [];
+                    console.log(`구사 재경기: ${pUserId}에게 game:state 전송`, { 
+                      myCardsCount: playerCards.length, 
+                      cards: playerCards.map(c => c.id) 
+                    });
                     playerSocket.emit('game:state', {
-                      myCards: newPlayerCards[pUserId] || [],
+                      myCards: playerCards,
                       gameState: {
-                        phase: 'betting',
+                        phase: 'initial', // 재경기는 initial 페이즈부터 시작
                         bettingRound: 1,
                         currentPlayerIndex: gameState.currentPlayerIndex,
                         pot: gameState.gameData.pot, // 판돈 유지
                         baseBet: gameState.baseBet,
-                        currentBet: gameState.currentBet,
+                        currentBet: gameState.baseBet, // 재경기 시작 시 currentBet 초기화
                         dealerIndex: gameState.gameData.dealerIndex,
                         playerBettingStates: gameState.playerBettingStates, // 베팅 상태도 함께 전송
+                        playerCards: newPlayerCards, // 카드 정보도 함께 전송
                       },
                     });
+                  } else {
+                    console.warn(`구사 재경기: ${pUserId}의 소켓을 찾을 수 없습니다`);
                   }
                 });
                 
-                // 재경기 시작 알림
-                io.to(roomId).emit('game:action', {
-                  action: {
-                    type: 'gusa-draw',
-                    drawType: drawCheck.drawType,
-                    message: drawCheck.drawType === 'gusa' 
-                      ? '구사로 인한 무승부! 재경기를 시작합니다.' 
-                      : '멍텅구리 구사로 인한 무승부! 재경기를 시작합니다.',
-                    alivePlayers: Array.from(alivePlayerIds),
-                  },
-                  gameState: {
-                    phase: 'betting',
-                    bettingRound: 1,
-                    currentPlayerIndex: gameState.currentPlayerIndex,
-                    pot: gameState.gameData.pot,
-                    baseBet: gameState.baseBet,
-                    currentBet: gameState.currentBet,
-                    dealerIndex: gameState.gameData.dealerIndex,
-                    playerBettingStates: gameState.playerBettingStates, // 베팅 상태도 함께 전송
-                  },
-                  timestamp: new Date(),
-                });
-                
-                // 첫 번째 카드 공개
-                const partiallyRevealed: Record<string, Card> = {};
+                // 재경기 시작 알림 (각 플레이어에게 개별적으로 전송하여 myCards 포함)
                 room.players.forEach((player) => {
                   const pUserId = player.userId.toString();
-                  if (alivePlayerIds.has(pUserId)) {
-                    const cards = newPlayerCards[pUserId];
-                    if (cards && cards.length > 0) {
-                      partiallyRevealed[pUserId] = cards[0];
-                    }
+                  if (!alivePlayerIds.has(pUserId)) {
+                    return; // 살아있지 않은 플레이어는 스킵
                   }
-                });
-                
-                io.to(roomId).emit('game:action', {
-                  action: {
-                    type: 'initial-reveal',
-                    partiallyRevealedCards: partiallyRevealed,
-                  },
-                  timestamp: new Date(),
+                  
+                  const playerSocket = Array.from(io.sockets.sockets.values()).find(
+                    (s: any) => s.userId === pUserId
+                  );
+                  
+                  if (playerSocket) {
+                    const playerCards = newPlayerCards[pUserId] || [];
+                    console.log(`구사 재경기: ${pUserId}에게 gusa-draw 전송`, { 
+                      myCardsCount: playerCards.length, 
+                      cards: playerCards.map(c => c.id) 
+                    });
+                    playerSocket.emit('game:action', {
+                      action: {
+                        type: 'gusa-draw',
+                        drawType: drawCheck.drawType,
+                        message: drawCheck.drawType === 'gusa' 
+                          ? '구사로 인한 무승부! 재경기를 시작합니다.' 
+                          : '멍텅구리 구사로 인한 무승부! 재경기를 시작합니다.',
+                        alivePlayers: Array.from(alivePlayerIds),
+                        userId: pUserId, // 각 플레이어의 ID 포함
+                      },
+                      gameState: {
+                        phase: 'initial', // 재경기는 initial 페이즈부터 시작
+                        bettingRound: 1,
+                        currentPlayerIndex: gameState.currentPlayerIndex,
+                        pot: gameState.gameData.pot,
+                        baseBet: gameState.baseBet,
+                        currentBet: gameState.baseBet, // 재경기 시작 시 currentBet 초기화
+                        dealerIndex: gameState.gameData.dealerIndex,
+                        playerBettingStates: gameState.playerBettingStates, // 베팅 상태도 함께 전송
+                        playerCards: newPlayerCards, // 카드 정보도 함께 전송
+                      },
+                      myCards: playerCards, // 각 플레이어의 카드 포함
+                      timestamp: new Date(),
+                    });
+                  } else {
+                    console.warn(`구사 재경기: ${pUserId}의 소켓을 찾을 수 없습니다 (gusa-draw)`);
+                  }
                 });
                 
                 return; // 재경기 시작, 게임 종료하지 않음
@@ -1137,6 +1170,16 @@ export const setupSocketIO = (io: Server) => {
               }
 
               // 게임 종료 및 결과 전송
+              // 모든 플레이어의 최신 money 값 가져오기
+              const updatedPlayerMoney: Record<string, number> = {};
+              for (const player of room.players) {
+                const userId = player.userId.toString();
+                const user = await User.findById(userId);
+                if (user) {
+                  updatedPlayerMoney[userId] = user.money;
+                }
+              }
+              
               const revealData = {
                 action: {
                   type: 'reveal',
@@ -1160,6 +1203,7 @@ export const setupSocketIO = (io: Server) => {
                 moneyChanges,
                 gameState: {
                   phase: 'finished',
+                  playerMoney: updatedPlayerMoney, // 업데이트된 플레이어 보유 금액
                 },
                 timestamp: new Date(),
               };
@@ -1173,7 +1217,17 @@ export const setupSocketIO = (io: Server) => {
               await room.save();
               gameStates.delete(roomId);
               
+              // room:update 전송 전에 플레이어의 money 업데이트
               const updatedRoom = await GameRoom.findById(roomId).populate('hostId', 'username');
+              if (updatedRoom) {
+                // 플레이어의 money 업데이트
+                for (let i = 0; i < updatedRoom.players.length; i++) {
+                  const userId = updatedRoom.players[i].userId.toString();
+                  if (updatedPlayerMoney[userId] !== undefined) {
+                    updatedRoom.players[i].money = updatedPlayerMoney[userId];
+                  }
+                }
+              }
               io.to(roomId).emit('room:update', updatedRoom);
               
               gameState.phase = 'finished';

@@ -101,6 +101,30 @@ export default function GameRoom() {
       // 모든 game:action 이벤트 로깅
       console.log('GameRoom: game:action 이벤트 수신:', data.action?.type, data);
       
+      // playerMoney 업데이트 (배팅 후 보유 금액 변경 반영)
+      if (data.gameState?.playerMoney) {
+        setRoom((currentRoom) => {
+          if (!currentRoom) return currentRoom;
+          
+          const updatedPlayers = currentRoom.players.map((player) => {
+            const playerUserId = String(player.userId);
+            const updatedMoney = data.gameState.playerMoney[playerUserId] || data.gameState.playerMoney[player.userId];
+            if (updatedMoney !== undefined) {
+              return {
+                ...player,
+                money: updatedMoney,
+              };
+            }
+            return player;
+          });
+          
+          return {
+            ...currentRoom,
+            players: updatedPlayers,
+          };
+        });
+      }
+      
       // 게임 종료 이벤트 처리 (game-end 또는 reveal)
       if (data.action?.type === 'game-end' || data.action?.type === 'reveal') {
         console.log('게임 종료 이벤트 수신:', data.action?.type, data);
