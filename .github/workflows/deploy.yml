@@ -59,6 +59,25 @@ jobs:
           target: ${{ secrets.DEPLOY_PATH || '/var/www/game-platform' }}/backend
           strip_components: 1
 
+      - name: Clean old frontend files on server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script: |
+            DEPLOY_PATH="${{ secrets.DEPLOY_PATH || '/var/www/game-platform' }}"
+            FRONTEND_PATH="$DEPLOY_PATH/frontend"
+            echo "기존 프론트엔드 디렉토리 삭제: $FRONTEND_PATH"
+            if [ -d "$FRONTEND_PATH" ]; then
+              sudo rm -rf "$FRONTEND_PATH"/* || rm -rf "$FRONTEND_PATH"/* || true
+              echo "✓ 기존 파일 삭제 완료"
+            else
+              echo "프론트엔드 디렉토리 생성: $FRONTEND_PATH"
+              sudo mkdir -p "$FRONTEND_PATH" || mkdir -p "$FRONTEND_PATH" || true
+            fi
+
       - name: Deploy frontend files
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -180,30 +199,69 @@ jobs:
             
             # 프론트엔드 배포 확인 및 권한 설정
             echo "=== 프론트엔드 배포 확인 ==="
-            cd $DEPLOY_PATH/frontend
-            if [ -d "." ]; then
-              echo "✓ 프론트엔드 디렉토리 확인됨"
-              ls -la
-              echo "프론트엔드 파일 목록:"
-              find . -type f -name "*.html" -o -name "*.js" -o -name "*.css" | head -10 || true
-              # 파일 권한 설정 (Nginx가 읽을 수 있도록)
-              sudo chown -R www-data:www-data . || sudo chown -R nginx:nginx . || true
-              sudo chmod -R 755 . || true
-            else
-              echo "⚠ 프론트엔드 디렉토리가 없습니다: $DEPLOY_PATH/frontend"
+            FRONTEND_PATH="$DEPLOY_PATH/frontend"
+            
+            # 기존 프론트엔드 디렉토리 확인
+            if [ -d "$FRONTEND_PATH" ]; then
+              echo "기존 프론트엔드 디렉토리 발견, 내용 확인:"
+              ls -la "$FRONTEND_PATH" || true
+              echo "기존 파일 개수:"
+              find "$FRONTEND_PATH" -type f | wc -l || echo "0"
             fi
             
-            # Nginx 설정 확인
+            # 새로 배포된 파일 확인
+            if [ -d "$FRONTEND_PATH" ]; then
+              echo "✓ 프론트엔드 디렉토리 확인됨: $FRONTEND_PATH"
+              cd "$FRONTEND_PATH"
+              echo "현재 디렉토리: $(pwd)"
+              echo "파일 목록:"
+              ls -la || true
+              echo "HTML 파일:"
+              find . -maxdepth 2 -type f -name "*.html" || true
+              echo "JS 파일 (처음 5개):"
+              find . -type f -name "*.js" | head -5 || true
+              echo "CSS 파일 (처음 5개):"
+              find . -type f -name "*.css" | head -5 || true
+              
+              # 파일 권한 설정 (Nginx가 읽을 수 있도록)
+              echo "파일 권한 설정 중..."
+              sudo chown -R www-data:www-data "$FRONTEND_PATH" 2>/dev/null || \
+              sudo chown -R nginx:nginx "$FRONTEND_PATH" 2>/dev/null || \
+              sudo chown -R $USER:$USER "$FRONTEND_PATH" 2>/dev/null || true
+              sudo chmod -R 755 "$FRONTEND_PATH" || sudo chmod -R 644 "$FRONTEND_PATH"/* || true
+              
+              echo "권한 설정 후:"
+              ls -la "$FRONTEND_PATH" | head -10 || true
+            else
+              echo "⚠ 프론트엔드 디렉토리가 없습니다: $FRONTEND_PATH"
+              echo "배포 경로 확인:"
+              ls -la "$DEPLOY_PATH" || true
+            fi
+            
+            # Nginx 설정 확인 및 업데이트
             echo "=== Nginx 설정 확인 ==="
+            NGINX_CONFIG="/etc/nginx/sites-available/default"
+            if [ -f "$NGINX_CONFIG" ]; then
+              echo "Nginx 설정 파일 확인: $NGINX_CONFIG"
+              echo "프론트엔드 root 경로 확인:"
+              sudo grep -n "root.*frontend\|alias.*frontend" "$NGINX_CONFIG" || echo "프론트엔드 경로를 찾을 수 없습니다"
+            fi
+            
+            # Nginx 설정 테스트
             sudo nginx -t || echo "⚠ Nginx 설정 테스트 실패"
             
             # Nginx 캐시 클리어
             echo "=== Nginx 캐시 클리어 ==="
             sudo rm -rf /var/cache/nginx/* || true
+            sudo rm -rf /var/lib/nginx/cache/* || true
             
             # Nginx 재시작
             echo "=== Nginx 재시작 ==="
             sudo systemctl reload nginx || sudo service nginx reload || sudo systemctl restart nginx || sudo service nginx restart || true
+            
+            # Nginx 상태 확인
+            echo "=== Nginx 상태 확인 ==="
+            sudo systemctl status nginx --no-pager -l || sudo service nginx status || true
             
             echo "=== 배포 완료 ==="
             echo "프론트엔드 경로: $DEPLOY_PATH/frontend"
