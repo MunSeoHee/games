@@ -303,6 +303,7 @@ jobs:
             NGINX_CONFIG="/etc/nginx/sites-available/default"
             NGINX_ENABLED="/etc/nginx/sites-enabled/default"
             FRONTEND_PATH="$DEPLOY_PATH/frontend"
+            BACKEND_PORT="${{ secrets.PORT || '3002' }}"
             
             # 설정 파일 찾기
             if [ -f "$NGINX_CONFIG" ]; then
@@ -315,44 +316,67 @@ jobs:
             
             if [ -f "$CONFIG_FILE" ]; then
               echo "Nginx 설정 파일: $CONFIG_FILE"
-              echo "=== 현재 프론트엔드 경로 확인 ==="
-              CURRENT_ROOT=$(sudo grep -E "^\s*root\s+" "$CONFIG_FILE" | grep -v "#" | head -1 | awk '{print $2}' | tr -d ';' || echo "")
-              if [ -n "$CURRENT_ROOT" ]; then
-                echo "현재 root 경로: $CURRENT_ROOT"
-                
-                # 실제 파일이 있는 경로 확인 (dist 폴더 안에 있을 수 있음)
-                if [ -f "$FRONTEND_PATH/dist/index.html" ]; then
-                  ACTUAL_FRONTEND_PATH="$FRONTEND_PATH/dist"
-                elif [ -f "$FRONTEND_PATH/index.html" ]; then
-                  ACTUAL_FRONTEND_PATH="$FRONTEND_PATH"
-                else
-                  ACTUAL_FRONTEND_PATH="$FRONTEND_PATH"
-                fi
-                
-                echo "새 배포 경로: $ACTUAL_FRONTEND_PATH"
-                
-                # 경로가 다르면 업데이트
-                if [ "$CURRENT_ROOT" != "$ACTUAL_FRONTEND_PATH" ]; then
-                  echo "⚠ 경로가 다릅니다. Nginx 설정 업데이트 중..."
-                  # 백업 생성
-                  sudo cp "$CONFIG_FILE" "$CONFIG_FILE.backup.$(date +%Y%m%d_%H%M%S)" || true
-                  
-                  # root 경로 업데이트
-                  sudo sed -i "s|root $CURRENT_ROOT|root $ACTUAL_FRONTEND_PATH|g" "$CONFIG_FILE" || \
-                  sudo sed -i "s|root.*mygame|root $ACTUAL_FRONTEND_PATH|g" "$CONFIG_FILE" || \
-                  sudo sed -i "s|root.*frontend[^/]|root $ACTUAL_FRONTEND_PATH|g" "$CONFIG_FILE" || \
-                  echo "⚠ 자동 업데이트 실패. 수동으로 업데이트 필요: $CONFIG_FILE"
-                  
-                  echo "업데이트 후 설정 확인:"
-                  sudo grep -E "^\s*root\s+" "$CONFIG_FILE" | grep -v "#" || true
-                else
-                  echo "✓ 경로가 일치합니다"
-                fi
+              
+              # 실제 파일이 있는 경로 확인
+              if [ -f "$FRONTEND_PATH/dist/index.html" ]; then
+                ACTUAL_FRONTEND_PATH="$FRONTEND_PATH/dist"
+              elif [ -f "$FRONTEND_PATH/index.html" ]; then
+                ACTUAL_FRONTEND_PATH="$FRONTEND_PATH"
               else
-                echo "⚠ root 경로를 찾을 수 없습니다"
+                ACTUAL_FRONTEND_PATH="$FRONTEND_PATH"
               fi
+              
+              echo "프론트엔드 경로: $ACTUAL_FRONTEND_PATH"
+              echo "백엔드 포트: $BACKEND_PORT"
+              
+              # 백업 생성
+              sudo cp "$CONFIG_FILE" "$CONFIG_FILE.backup.$(date +%Y%m%d_%H%M%S)" || true
+              
+              # 올바른 Nginx 설정 생성
+              sudo tee "$CONFIG_FILE" > /dev/null <<EOF
+server {
+    listen 80;
+    server_name _;
+    
+    # 프론트엔드 정적 파일
+    location / {
+        root $ACTUAL_FRONTEND_PATH;
+        try_files \$uri \$uri/ /index.html;
+        index index.html;
+    }
+    
+    # 백엔드 API 프록시
+    location /api/ {
+        proxy_pass http://localhost:$BACKEND_PORT;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_cache_bypass \$http_upgrade;
+    }
+    
+    # Socket.io 프록시
+    location /socket.io/ {
+        proxy_pass http://localhost:$BACKEND_PORT;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
+EOF
+              
+              echo "✓ Nginx 설정 파일 업데이트 완료"
+              echo "설정 내용 확인:"
+              sudo grep -E "^\s*(root|proxy_pass|location)" "$CONFIG_FILE" | head -10 || true
             else
-              echo "⚠ Nginx 설정 파일을 찾을 수 없습니다"
+              echo "⚠ Nginx 설정 파일을 찾을 수 없습니다: $CONFIG_FILE"
             fi
             
             # 실제 프론트엔드 파일 위치 확인
