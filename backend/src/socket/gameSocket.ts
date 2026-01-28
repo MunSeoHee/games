@@ -213,6 +213,7 @@ export const setupSocketIO = (io: Server) => {
               amount: 0,
               totalBet: baseBet, // 게임 내에서는 원 단위로 표시
               roundBet: 0, // 첫 번째 라운드 베팅 금액 (기본 베팅금은 포함하지 않음)
+              roundBets: [], // 각 라운드별 배팅 금액 배열
               totalBetCoins: baseBetCoins, // 실제 차감되는 코인
               hasCalled: false,
               hasRaised: false,
@@ -448,11 +449,12 @@ export const setupSocketIO = (io: Server) => {
             if (bettingAction === 'die') {
               playerBettingState.isAlive = false;
               playerBettingState.action = 'die';
+              gameState.playerBettingStates[userId] = playerBettingState;
               
               // 1인만 남았는지 확인
               const checkResult = checkBettingRoundComplete(
                 room.players,
-                { ...gameState.playerBettingStates, [userId]: playerBettingState },
+                gameState.playerBettingStates,
                 gameState.lastRaisePlayerIndex,
                 gameState.currentBet
               );
@@ -466,11 +468,34 @@ export const setupSocketIO = (io: Server) => {
                   await winnerUser.save();
                 }
                 
+                // 게임 종료 및 결과 전송
+                const winnerId = checkResult.winnerId;
+                const winnerPlayer = room.players.find((p) => String(p.userId) === String(winnerId));
+                
+                // 방 상태를 WAITING으로 변경하고 플레이어 준비 상태 초기화
+                room.status = GameRoomStatus.WAITING;
+                room.players.forEach((p) => (p.isReady = false));
+                await room.save();
+                gameStates.delete(roomId);
+                
+                const updatedRoom = await GameRoom.findById(roomId).populate('hostId', 'username');
+                io.to(roomId).emit('room:update', updatedRoom);
+                
                 io.to(roomId).emit('game:action', {
                   action: {
                     type: 'game-end',
-                    winnerId: checkResult.winnerId,
+                    winnerId: winnerId,
                     reason: '기권승',
+                    results: room.players.map((p) => ({
+                      userId: p.userId.toString(),
+                      username: p.username,
+                      description: String(p.userId) === String(winnerId) ? '승리' : '패배',
+                    })),
+                  },
+                  gameState: {
+                    phase: 'finished',
+                    pot: gameState.gameData.pot,
+                    playerBettingStates: gameState.playerBettingStates,
                   },
                   timestamp: new Date(),
                 });
@@ -478,6 +503,41 @@ export const setupSocketIO = (io: Server) => {
                 gameState.phase = 'finished';
                 return;
               }
+              
+              // 다이 후 다음 플레이어로 턴 넘기기
+              const nextPlayerIndex = getNextAlivePlayerIndex(
+                playerIndex,
+                room.players,
+                gameState.playerBettingStates
+              );
+              
+              if (nextPlayerIndex !== -1) {
+                gameState.currentPlayerIndex = nextPlayerIndex;
+              }
+              
+              // 모든 플레이어에게 게임 상태 업데이트 전송
+              io.to(roomId).emit('game:action', {
+                action: {
+                  type: 'betting-action',
+                  bettingAction: 'die',
+                  userId,
+                  username: user.username,
+                },
+                gameState: {
+                  phase: gameState.phase,
+                  bettingRound: gameState.bettingRound,
+                  currentPlayerIndex: gameState.currentPlayerIndex,
+                  pot: gameState.gameData.pot,
+                  baseBet: gameState.baseBet,
+                  currentBet: gameState.currentBet,
+                  dealerIndex: gameState.gameData.dealerIndex,
+                  playerBettingStates: gameState.playerBettingStates,
+                  playerMoney: gameState.playerMoney,
+                },
+                timestamp: new Date(),
+              });
+              
+              return; // 다이 처리 완료, 함수 종료
             } else {
               // 베팅 금액 계산 (게임 내에서는 원 단위로 계산)
               // 현재 라운드에서의 총 베팅 금액 = playerBettingState.totalBet (현재 라운드의 총 베팅)
@@ -523,6 +583,11 @@ export const setupSocketIO = (io: Server) => {
                 playerBettingState.roundBet = 0;
               }
               playerBettingState.roundBet += actualBetAmount;
+              
+              // roundBets 배열 초기화 (없는 경우)
+              if (!playerBettingState.roundBets) {
+                playerBettingState.roundBets = [];
+              }
               if (!playerBettingState.totalBetCoins) {
                 playerBettingState.totalBetCoins = 0;
               }
@@ -576,6 +641,15 @@ export const setupSocketIO = (io: Server) => {
                 winnerUser.money += gameState.gameData.pot;
                 await winnerUser.save();
               }
+              
+              // 방 상태를 WAITING으로 변경하고 플레이어 준비 상태 초기화
+              room.status = GameRoomStatus.WAITING;
+              room.players.forEach((p) => (p.isReady = false));
+              await room.save();
+              gameStates.delete(roomId);
+              
+              const updatedRoom = await GameRoom.findById(roomId).populate('hostId', 'username');
+              io.to(roomId).emit('room:update', updatedRoom);
               
               io.to(roomId).emit('game:action', {
                 action: {
@@ -631,6 +705,14 @@ export const setupSocketIO = (io: Server) => {
                 Object.keys(gameState.playerBettingStates).forEach((uid) => {
                   const state = gameState.playerBettingStates[uid];
                   if (state.isAlive) {
+                    // 1라운드 배팅 금액을 roundBets 배열에 저장
+                    if (state.roundBet !== undefined && state.roundBet > 0) {
+                      if (!state.roundBets) {
+                        state.roundBets = [];
+                      }
+                      state.roundBets.push(state.roundBet);
+                    }
+                    
                     state.hasCalled = false;
                     state.hasRaised = false;
                     state.action = undefined;
@@ -870,6 +952,9 @@ export const setupSocketIO = (io: Server) => {
                     state.hasRaised = false;
                     state.action = undefined;
                     state.amount = 0;
+                    state.roundBet = 0; // 현재 라운드 배팅 금액 초기화
+                    state.roundBets = []; // 라운드별 배팅 금액 배열 초기화
+                    state.totalBet = gameState.baseBet; // 총 배팅 금액을 baseBet으로 초기화 (재경기 시작)
                     // isAlive는 유지 (다이한 사람은 이미 false)
                   }
                 });
@@ -916,6 +1001,7 @@ export const setupSocketIO = (io: Server) => {
                         baseBet: gameState.baseBet,
                         currentBet: gameState.currentBet,
                         dealerIndex: gameState.gameData.dealerIndex,
+                        playerBettingStates: gameState.playerBettingStates, // 베팅 상태도 함께 전송
                       },
                     });
                   }
@@ -939,6 +1025,7 @@ export const setupSocketIO = (io: Server) => {
                     baseBet: gameState.baseBet,
                     currentBet: gameState.currentBet,
                     dealerIndex: gameState.gameData.dealerIndex,
+                    playerBettingStates: gameState.playerBettingStates, // 베팅 상태도 함께 전송
                   },
                   timestamp: new Date(),
                 });
@@ -1080,26 +1167,17 @@ export const setupSocketIO = (io: Server) => {
               console.log('게임 결과 전송:', { roomId, revealData });
               io.to(roomId).emit('game:action', revealData);
 
+              // 방 상태를 WAITING으로 변경하고 플레이어 준비 상태 초기화
+              room.status = GameRoomStatus.WAITING;
+              room.players.forEach((p) => (p.isReady = false));
+              await room.save();
+              gameStates.delete(roomId);
+              
+              const updatedRoom = await GameRoom.findById(roomId).populate('hostId', 'username');
+              io.to(roomId).emit('room:update', updatedRoom);
+              
               gameState.phase = 'finished';
               console.log('게임 종료 완료:', { roomId, phase: gameState.phase });
-              
-              // 게임 종료 후 방 상태 변경 (5초 후)
-              setTimeout(async () => {
-                try {
-                  const currentRoom = await GameRoom.findById(roomId);
-                  if (currentRoom) {
-                    currentRoom.status = GameRoomStatus.WAITING;
-                    currentRoom.players.forEach((p) => (p.isReady = false));
-                    await currentRoom.save();
-                    gameStates.delete(roomId);
-                    const updatedRoom = await GameRoom.findById(roomId).populate('hostId', 'username');
-                    io.to(roomId).emit('room:update', updatedRoom);
-                    console.log('방 상태 초기화 완료:', { roomId });
-                  }
-                } catch (error) {
-                  console.error('방 상태 초기화 오류:', error);
-                }
-              }, 5000);
             } else {
               // 아직 선택하지 않은 플레이어가 있음
               // 선택 완료한 플레이어에게 확인 응답 전송

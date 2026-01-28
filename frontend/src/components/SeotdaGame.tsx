@@ -1,6 +1,6 @@
 import { useEffect, useState, useMemo } from 'react';
 import { Socket } from 'socket.io-client';
-import { Card, GameRoom, Player } from '../shared/types/game';
+import { Card, GameRoom, Player, GameRoomStatus } from '../shared/types/game';
 import { useAuthStore } from '../store/authStore';
 import CardComponent from './Card';
 import { calculatePossibleHands, calculateSeotdaScore } from '../shared/utils/seotdaUtils';
@@ -27,6 +27,7 @@ interface GameState {
 }
 
 export default function SeotdaGame({ roomId, socket, room }: SeotdaGameProps) {
+  const { user } = useAuthStore();
   const [gameState, setGameState] = useState<GameState>({
     phase: 'betting',
     bettingRound: 1,
@@ -46,7 +47,6 @@ export default function SeotdaGame({ roomId, socket, room }: SeotdaGameProps) {
   const [selectedCards, setSelectedCards] = useState<Card[]>([]); // 쇼다운에서 선택한 2장
   const [cardsSelected, setCardsSelected] = useState(false); // 카드 선택 완료 여부
   const [revealCardSelected, setRevealCardSelected] = useState<Card | null>(null); // 게임 시작 시 선택한 공개 카드
-  const { user } = useAuthStore();
   
   // 이미지 사용 여부 (이미지 파일이 있으면 true로 변경)
   const useCardImages = true; // 이미지 파일 추가 완료
@@ -59,6 +59,15 @@ export default function SeotdaGame({ roomId, socket, room }: SeotdaGameProps) {
         setMyCards(data.myCards);
       }
       if (data.gameState) {
+        // 새로운 게임 시작 시 게임 결과 초기화
+        if (data.gameState.phase === 'initial') {
+          setGameResults(null);
+          setRevealedCards({});
+          setPartiallyRevealedCards({});
+          setSelectedCards([]);
+          setCardsSelected(false);
+          setRevealCardSelected(null);
+        }
         setGameState((prev) => ({
           ...prev,
           ...data.gameState,
@@ -117,6 +126,7 @@ export default function SeotdaGame({ roomId, socket, room }: SeotdaGameProps) {
             ...prev,
             ...data.gameState,
             phase: 'betting',
+            playerBettingStates: data.gameState.playerBettingStates || prev.playerBettingStates, // 베팅 상태 업데이트
           }));
         }
         // 재경기 알림 표시
@@ -146,6 +156,43 @@ export default function SeotdaGame({ roomId, socket, room }: SeotdaGameProps) {
           setPartiallyRevealedCards((prev) => ({
             ...prev,
             [data.userId]: data.card,
+          }));
+        }
+      } else if (data.action?.type === 'game-end') {
+        // 게임 종료 (기권승 등)
+        console.log('게임 종료:', data);
+        const winnerId = data.action?.winnerId;
+        
+        // 백엔드에서 보낸 results가 있으면 사용, 없으면 room.players로 생성
+        const results = data.action?.results || room.players.map((p: Player) => ({
+          userId: p.userId.toString(),
+          username: p.username,
+          description: String(p.userId) === String(winnerId) ? '승리' : '패배',
+        }));
+        
+        // 게임 결과 설정
+        setGameResults({
+          results: results.map((r: any) => ({
+            userId: r.userId || r.userId?.toString(),
+            username: r.username,
+            description: r.description || (String(r.userId) === String(winnerId) ? '승리' : '패배'),
+          })),
+          winner: winnerId,
+          pot: data.gameState?.pot || gameState.pot,
+          reason: data.action?.reason || '기권승',
+        });
+        
+        // 게임 종료 상태 업데이트
+        if (data.gameState) {
+          setGameState((prev) => ({
+            ...prev,
+            ...data.gameState,
+            phase: 'finished',
+          }));
+        } else {
+          setGameState((prev) => ({
+            ...prev,
+            phase: 'finished',
           }));
         }
       } else if (data.action?.type === 'reveal') {
@@ -291,6 +338,60 @@ export default function SeotdaGame({ roomId, socket, room }: SeotdaGameProps) {
     }
   };
 
+  // 방 상태가 WAITING이고 게임이 종료되지 않았으면 null 반환 (대기실은 부모에서 처리)
+  // 게임 종료 결과는 표시해야 하므로, WAITING 상태일 때는 게임 결과만 표시
+  if (room.status === GameRoomStatus.WAITING && gameState.phase !== 'finished') {
+    return null;
+  }
+
+  // WAITING 상태이고 게임이 종료되었을 때는 게임 결과만 표시
+  if (room.status === GameRoomStatus.WAITING && gameState.phase === 'finished') {
+    return (
+      <div className="mt-6">
+        {gameResults && (
+          <div className="mb-6 p-4 bg-yellow-50 border-2 border-yellow-500 rounded-lg">
+            <h3 className="text-xl font-bold mb-2">게임 결과</h3>
+            <div className="space-y-2">
+              {gameResults.results?.map((result: any, idx: number) => {
+                const player = room.players.find((p: Player) => p.userId === result.userId || p.username === result.username);
+                return (
+                  <div key={idx} className={`p-2 rounded ${result.userId === gameResults.winner ? 'bg-green-100 font-bold' : 'bg-gray-100'}`}>
+                    {player?.username}: {result.description}
+                    {result.userId === gameResults.winner && ' 🏆 승리!'}
+                  </div>
+                );
+              })}
+            </div>
+            <div className="mt-4 text-lg font-semibold">
+              승자: {room.players.find((p: Player) => p.userId === gameResults.winner || p.username === gameResults.winner)?.username}
+              <br />
+              판돈: {formatSeotdaMoney(gameResults.pot || 0)}
+            </div>
+            {(() => {
+              const isHost = typeof room.hostId === 'object' 
+                ? room.hostId.username === user?.username 
+                : room.hostId.toString() === user?.id;
+              return isHost && (
+                <div className="mt-4">
+                  <button
+                    onClick={() => {
+                      if (socket) {
+                        socket.emit('game:start', roomId);
+                      }
+                    }}
+                    className="w-full py-2 px-4 bg-purple-600 text-white rounded-md font-semibold hover:bg-purple-700"
+                  >
+                    다음 게임 시작
+                  </button>
+                </div>
+              );
+            })()}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="bg-white rounded-lg shadow-md p-6">
       <h2 className="text-2xl font-bold mb-6">섯다 게임</h2>
@@ -304,20 +405,6 @@ export default function SeotdaGame({ roomId, socket, room }: SeotdaGameProps) {
           {gameState.bettingRound === 2 && '두 번째 라운드'}
           {gameState.phase === 'showdown' && '쇼다운'}
         </div>
-        {/* 현재 패의 족보 표시 (2장일 때) */}
-        {currentHand && myCards.length === 2 && (
-          <div className="mt-2">
-            <div className={`inline-block px-4 py-2 rounded-lg font-bold text-white ${
-              currentHand.handType === 'gwangttang' ? 'bg-red-600' :
-              currentHand.handType === 'ttang' ? 'bg-orange-500' :
-              currentHand.handType === 'special' ? 'bg-purple-500' :
-              currentHand.handType === 'kkeut' ? 'bg-blue-500' :
-              'bg-gray-400'
-            }`}>
-              현재 패: {currentHand.description}
-            </div>
-          </div>
-        )}
       </div>
 
       {/* 게임 시작 시 카드 선택 UI */}
@@ -347,22 +434,88 @@ export default function SeotdaGame({ roomId, socket, room }: SeotdaGameProps) {
           const isCurrentPlayer = idx === gameState.currentPlayerIndex;
           const playerUserId = String(player.userId);
           const isCurrentUser = user && (playerUserId === user.id || player.username === user.username);
+          
+          // 선택 단계에서 선택 여부 확인
+          let needsSelection = false;
+          if (gameState.phase === 'initial') {
+            // initial 단계: 카드를 선택하지 않은 플레이어
+            const revealedCard = partiallyRevealedCards[playerUserId];
+            needsSelection = !revealedCard;
+          } else if (gameState.phase === 'showdown') {
+            // showdown 단계: 살아있는 플레이어 중 카드를 선택하지 않은 플레이어
+            const playerBettingState = gameState.playerBettingStates?.[playerUserId] || gameState.playerBettingStates?.[player.userId];
+            const isAlive = playerBettingState?.isAlive !== false;
+            const hasSelectedCards = revealedCards[playerUserId] && revealedCards[playerUserId].length > 0;
+            needsSelection = isAlive && !hasSelectedCards;
+          }
+          
+          // 테두리 스타일 결정
+          let borderClass = 'border-2 border-gray-200';
+          if (needsSelection) {
+            // 선택해야 하는 플레이어: 굵은 테두리
+            borderClass = 'border-4 border-purple-500';
+          } else if (isCurrentPlayer && gameState.phase !== 'initial' && gameState.phase !== 'showdown') {
+            // 일반 턴에서 현재 플레이어: 굵은 테두리
+            borderClass = 'border-4 border-purple-500';
+          }
 
           return (
             <div
               key={player.userId}
-              className={`border-2 rounded-lg p-4 ${
+              className={`rounded-lg p-4 ${
                 isCurrentUser 
-                  ? 'border-blue-500 bg-blue-50 shadow-lg' 
-                  : 'border-gray-200 bg-gray-50'
-              }`}
+                  ? 'bg-purple-50' 
+                  : 'bg-gray-50'
+              } ${borderClass}`}
             >
-              <div className="font-semibold mb-2">
-                {player.username}
-                {isDealer && ' (딜러)'}
-                {isCurrentPlayer && ' (현재 턴)'}
-                {isCurrentUser && ' (나)'}
+              <div className="font-semibold mb-2 flex items-center gap-2 flex-wrap">
+                <span>
+                  {player.username}
+                  {isCurrentUser && ' (나)'}
+                </span>
+                {/* 현재 플레이어의 족보 라벨 (2장 또는 3장일 때) */}
+                {isCurrentUser && myCards.length >= 2 && (
+                  <div className="flex flex-wrap gap-1">
+                    {myCards.length === 2 && currentHand && (
+                      <span className="px-2 py-0.5 text-xs bg-gray-200 text-gray-700 rounded">
+                        {currentHand.description}
+                      </span>
+                    )}
+                    {myCards.length === 3 && possibleHands.length > 0 && (
+                      possibleHands.map((hand, idx) => (
+                        <span key={idx} className="px-2 py-0.5 text-xs bg-gray-200 text-gray-700 rounded">
+                          {hand.description}
+                        </span>
+                      ))
+                    )}
+                  </div>
+                )}
               </div>
+              {/* 라운드별 배팅 금액 표시 */}
+              {(() => {
+                const playerUserId = String(player.userId);
+                const playerBettingState = gameState.playerBettingStates?.[playerUserId] || gameState.playerBettingStates?.[player.userId];
+                const roundBets = playerBettingState?.roundBets || [];
+                const currentRoundBet = playerBettingState?.roundBet || 0;
+                
+                if (roundBets.length > 0 || currentRoundBet > 0) {
+                  return (
+                    <div className="text-xs text-gray-600 mb-2 space-y-0.5">
+                      {roundBets.map((bet, idx) => (
+                        <div key={idx} className="text-blue-600">
+                          {idx + 1}라운드: {formatSeotdaMoney(bet)}
+                        </div>
+                      ))}
+                      {currentRoundBet > 0 && (
+                        <div className="text-blue-600 font-semibold">
+                          {gameState.bettingRound}라운드: {formatSeotdaMoney(currentRoundBet)}
+                        </div>
+                      )}
+                    </div>
+                  );
+                }
+                return null;
+              })()}
               <div className="flex gap-2">
                 {gameResults && cards.length > 0 ? (
                   // 게임 종료 시 모든 카드 공개
@@ -371,6 +524,7 @@ export default function SeotdaGame({ roomId, socket, room }: SeotdaGameProps) {
                   ))
                 ) : isCurrentUser && myCards.length > 0 ? (
                   // 현재 플레이어는 자신의 카드 모두 보기 (2장 또는 3장)
+                  // 항상 자신의 카드는 앞면으로 표시
                   myCards.map((card, cardIdx) => (
                     <CardComponent key={cardIdx} card={card} size="medium" useImage={useCardImages} />
                   ))
@@ -379,8 +533,20 @@ export default function SeotdaGame({ roomId, socket, room }: SeotdaGameProps) {
                   const revealedCard = partiallyRevealedCards[playerUserId];
                   
                   if (!revealedCard) {
-                    // 카드 공개 전
-                    return null;
+                    // 카드 공개 전: 뒷면 카드 2장 표시
+                    return (
+                      <>
+                        {Array.from({ length: 2 }).map((_, idx) => (
+                          <CardComponent 
+                            key={`back-${idx}-${playerUserId}`} 
+                            card={null} 
+                            isRevealed={false} 
+                            size="medium" 
+                            useImage={useCardImages} 
+                          />
+                        ))}
+                      </>
+                    );
                   }
                   
                   // bettingRound에 따라 표시할 카드 개수 결정
@@ -409,52 +575,24 @@ export default function SeotdaGame({ roomId, socket, room }: SeotdaGameProps) {
                   );
                 })()}
               </div>
-              {/* 현재 플레이어의 족보 라벨 (2장 또는 3장일 때) */}
-              {isCurrentUser && myCards.length >= 2 && (
-                <div className="mt-2 flex flex-wrap gap-1 justify-center">
-                  {myCards.length === 2 && currentHand && (
-                    <span className="px-2 py-0.5 text-xs bg-gray-200 text-gray-700 rounded">
-                      {currentHand.description}
-                    </span>
-                  )}
-                  {myCards.length === 3 && possibleHands.length > 0 && (
-                    possibleHands.map((hand, idx) => (
-                      <span key={idx} className="px-2 py-0.5 text-xs bg-gray-200 text-gray-700 rounded">
-                        {hand.description}
-                      </span>
-                    ))
-                  )}
-                </div>
-              )}
+              {/* 보유 금액 표시 */}
               {(() => {
                 const playerUserId = typeof player.userId === 'object' 
                   ? String(player.userId) 
                   : player.userId;
                 
-                const playerBettingState = gameState.playerBettingStates?.[playerUserId] || gameState.playerBettingStates?.[player.userId];
-                
-                // 보유 금액 표시 (게임 상태에서 가져오거나, room의 초기 금액 사용)
                 const currentMoney = gameState.playerMoney?.[playerUserId] || gameState.playerMoney?.[player.userId];
                 const initialMoney = player.money || 0;
                 const displayMoney = currentMoney !== undefined ? currentMoney : initialMoney;
                 
-                // 현재 라운드에서 베팅한 금액
-                const roundBet = playerBettingState?.roundBet || 0;
-                
-                return (
-                  <div className="text-sm text-gray-600 mt-2 space-y-1">
-                    {roundBet > 0 && (
-                      <div className="text-blue-600">
-                        라운드 베팅: {formatSeotdaMoney(roundBet)}
-                      </div>
-                    )}
-                    {displayMoney >= 0 && (
-                      <div>
-                        보유: {formatSeotdaMoney(coinsToWon(displayMoney))} <span className="text-gray-400">({displayMoney.toLocaleString()}코인)</span>
-                      </div>
-                    )}
-                  </div>
-                );
+                if (displayMoney >= 0) {
+                  return (
+                    <div className="text-sm text-gray-600 mt-2">
+                      보유: {formatSeotdaMoney(coinsToWon(displayMoney))} <span className="text-gray-400">({displayMoney.toLocaleString()}코인)</span>
+                    </div>
+                  );
+                }
+                return null;
               })()}
             </div>
           );
@@ -482,6 +620,25 @@ export default function SeotdaGame({ roomId, socket, room }: SeotdaGameProps) {
             <br />
             판돈: {formatSeotdaMoney(gameResults.pot || 0)}
           </div>
+          {(() => {
+            const isHost = typeof room.hostId === 'object' 
+              ? room.hostId.username === user?.username 
+              : room.hostId.toString() === user?.id;
+            return isHost && (
+              <div className="mt-4">
+                <button
+                  onClick={() => {
+                    if (socket) {
+                      socket.emit('game:start', roomId);
+                    }
+                  }}
+                  className="w-full py-2 px-4 bg-purple-600 text-white rounded-md font-semibold hover:bg-purple-700"
+                >
+                  다음 게임 시작
+                </button>
+              </div>
+            );
+          })()}
         </div>
       )}
 

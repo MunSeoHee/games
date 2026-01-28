@@ -72,6 +72,7 @@ export interface PlayerBettingState {
   amount: number;
   totalBet: number; // 게임 시작부터 현재까지의 총 베팅 금액 (누적)
   roundBet?: number; // 현재 라운드에서 베팅한 금액
+  roundBets?: number[]; // 각 라운드별 배팅 금액 배열 (예: [1000, 500] = 1라운드 1000원, 2라운드 500원)
   hasCalled: boolean;
   hasRaised: boolean;
   isAlive: boolean;

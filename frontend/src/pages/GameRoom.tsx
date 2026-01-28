@@ -220,6 +220,7 @@ export default function GameRoom() {
                 <div className="text-center text-gray-500">방 정보를 불러오는 중...</div>
               </div>
             ) : room.status === GameRoomStatus.WAITING ? (
+              // WAITING 상태: 항상 대기실 표시 (SeotdaGame은 게임 종료 결과만 표시)
               <div className="bg-white rounded-lg shadow-md p-6">
                 <h2 className="text-xl font-bold mb-4">대기실</h2>
                 {room.gameType === GameType.SEOTDA && room.baseBetCoins && (
@@ -295,6 +296,22 @@ export default function GameRoom() {
                     </div>
                   )}
                 </div>
+                {/* 게임 종료 결과 표시 (SeotdaGame에서 null을 반환하지 않도록) */}
+                {room.gameType === GameType.SEOTDA && socket && (
+                  <SeotdaGame roomId={roomId!} socket={socket} room={{
+                    id: room._id,
+                    hostId: typeof room.hostId === 'string' ? room.hostId : String(room.hostId),
+                    players: room.players.map(p => ({
+                      userId: String(p.userId),
+                      username: p.username,
+                      money: p.money,
+                      isReady: p.isReady
+                    })),
+                    gameType: room.gameType,
+                    status: room.status,
+                    createdAt: new Date()
+                  }} />
+                )}
               </div>
             ) : room.status === GameRoomStatus.PLAYING && room.gameType === GameType.SEOTDA ? (
               socket ? (
@@ -318,7 +335,7 @@ export default function GameRoom() {
               )
             ) : (
               <div className="bg-white rounded-lg shadow-md p-6">
-                  <div className="text-center text-gray-500">
+                <div className="text-center text-gray-500">
                   <div className="mb-2 font-bold">디버깅 정보:</div>
                   <div className="mb-2">게임 상태: {room.status || 'undefined'}</div>
                   <div className="mb-2">게임 타입: {room.gameType || 'undefined'}</div>
