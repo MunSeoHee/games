@@ -246,13 +246,27 @@ jobs:
             # 프론트엔드 배포 확인 및 권한 설정
             echo "=== 프론트엔드 배포 확인 ==="
             FRONTEND_PATH="$DEPLOY_PATH/frontend"
+            FRONTEND_DIST="$FRONTEND_PATH/dist"
             
-            # 기존 프론트엔드 디렉토리 확인
-            if [ -d "$FRONTEND_PATH" ]; then
-              echo "기존 프론트엔드 디렉토리 발견, 내용 확인:"
-              ls -la "$FRONTEND_PATH" || true
-              echo "기존 파일 개수:"
-              find "$FRONTEND_PATH" -type f | wc -l || echo "0"
+            # dist 폴더의 내용을 frontend로 이동 (scp-action이 dist 폴더를 그대로 복사했을 수 있음)
+            if [ -d "$FRONTEND_DIST" ]; then
+              echo "dist 폴더 발견, 내용을 frontend로 이동 중..."
+              # 기존 파일 백업
+              if [ -d "$FRONTEND_PATH" ] && [ "$(ls -A $FRONTEND_PATH 2>/dev/null | grep -v dist)" ]; then
+                echo "기존 파일 백업 중..."
+                sudo mv "$FRONTEND_PATH" "$FRONTEND_PATH.backup.$(date +%Y%m%d_%H%M%S)" || true
+              fi
+              
+              # dist 내용을 frontend로 이동
+              echo "dist 내용 이동 중..."
+              sudo mkdir -p "$FRONTEND_PATH" || mkdir -p "$FRONTEND_PATH" || true
+              sudo mv "$FRONTEND_DIST"/* "$FRONTEND_PATH"/ 2>/dev/null || \
+              sudo cp -r "$FRONTEND_DIST"/* "$FRONTEND_PATH"/ || true
+              
+              # dist 폴더 삭제
+              sudo rm -rf "$FRONTEND_DIST" || true
+              
+              echo "✓ 파일 이동 완료"
             fi
             
             # 새로 배포된 파일 확인
@@ -263,7 +277,7 @@ jobs:
               echo "파일 목록:"
               ls -la || true
               echo "HTML 파일:"
-              find . -maxdepth 2 -type f -name "*.html" || true
+              find . -maxdepth 1 -type f -name "*.html" || true
               echo "JS 파일 (처음 5개):"
               find . -type f -name "*.js" | head -5 || true
               echo "CSS 파일 (처음 5개):"
@@ -305,17 +319,28 @@ jobs:
               CURRENT_ROOT=$(sudo grep -E "^\s*root\s+" "$CONFIG_FILE" | grep -v "#" | head -1 | awk '{print $2}' | tr -d ';' || echo "")
               if [ -n "$CURRENT_ROOT" ]; then
                 echo "현재 root 경로: $CURRENT_ROOT"
-                echo "새 배포 경로: $FRONTEND_PATH"
+                
+                # 실제 파일이 있는 경로 확인 (dist 폴더 안에 있을 수 있음)
+                if [ -f "$FRONTEND_PATH/dist/index.html" ]; then
+                  ACTUAL_FRONTEND_PATH="$FRONTEND_PATH/dist"
+                elif [ -f "$FRONTEND_PATH/index.html" ]; then
+                  ACTUAL_FRONTEND_PATH="$FRONTEND_PATH"
+                else
+                  ACTUAL_FRONTEND_PATH="$FRONTEND_PATH"
+                fi
+                
+                echo "새 배포 경로: $ACTUAL_FRONTEND_PATH"
                 
                 # 경로가 다르면 업데이트
-                if [ "$CURRENT_ROOT" != "$FRONTEND_PATH" ]; then
+                if [ "$CURRENT_ROOT" != "$ACTUAL_FRONTEND_PATH" ]; then
                   echo "⚠ 경로가 다릅니다. Nginx 설정 업데이트 중..."
                   # 백업 생성
                   sudo cp "$CONFIG_FILE" "$CONFIG_FILE.backup.$(date +%Y%m%d_%H%M%S)" || true
                   
                   # root 경로 업데이트
-                  sudo sed -i "s|root $CURRENT_ROOT|root $FRONTEND_PATH|g" "$CONFIG_FILE" || \
-                  sudo sed -i "s|root.*mygame|root $FRONTEND_PATH|g" "$CONFIG_FILE" || \
+                  sudo sed -i "s|root $CURRENT_ROOT|root $ACTUAL_FRONTEND_PATH|g" "$CONFIG_FILE" || \
+                  sudo sed -i "s|root.*mygame|root $ACTUAL_FRONTEND_PATH|g" "$CONFIG_FILE" || \
+                  sudo sed -i "s|root.*frontend[^/]|root $ACTUAL_FRONTEND_PATH|g" "$CONFIG_FILE" || \
                   echo "⚠ 자동 업데이트 실패. 수동으로 업데이트 필요: $CONFIG_FILE"
                   
                   echo "업데이트 후 설정 확인:"
@@ -340,8 +365,28 @@ jobs:
               fi
             done
             
+            # 프론트엔드 파일 존재 확인
+            echo "=== 프론트엔드 파일 존재 확인 ==="
+            if [ -f "$FRONTEND_PATH/index.html" ]; then
+              echo "✓ index.html 파일 존재"
+              ls -lh "$FRONTEND_PATH/index.html" || true
+            else
+              echo "⚠ 경고: index.html 파일이 없습니다: $FRONTEND_PATH/index.html"
+              echo "디렉토리 내용:"
+              ls -la "$FRONTEND_PATH" || true
+            fi
+            
             # Nginx 설정 테스트
-            sudo nginx -t || echo "⚠ Nginx 설정 테스트 실패"
+            echo "=== Nginx 설정 테스트 ==="
+            NGINX_TEST=$(sudo nginx -t 2>&1)
+            echo "$NGINX_TEST"
+            if echo "$NGINX_TEST" | grep -q "successful"; then
+              echo "✓ Nginx 설정 테스트 성공"
+            else
+              echo "⚠ Nginx 설정 테스트 실패"
+              echo "에러 로그 확인:"
+              sudo tail -20 /var/log/nginx/error.log || true
+            fi
             
             # Nginx 캐시 클리어
             echo "=== Nginx 캐시 클리어 ==="
@@ -355,6 +400,10 @@ jobs:
             # Nginx 상태 확인
             echo "=== Nginx 상태 확인 ==="
             sudo systemctl status nginx --no-pager -l || sudo service nginx status || true
+            
+            # Nginx 에러 로그 확인
+            echo "=== 최근 Nginx 에러 로그 ==="
+            sudo tail -30 /var/log/nginx/error.log || echo "에러 로그를 읽을 수 없습니다"
             
             echo "=== 배포 완료 ==="
             echo "프론트엔드 경로: $DEPLOY_PATH/frontend"
