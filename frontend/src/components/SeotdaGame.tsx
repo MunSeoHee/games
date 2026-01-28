@@ -10,6 +10,8 @@ interface SeotdaGameProps {
   roomId: string;
   socket: Socket | null;
   room: GameRoom;
+  gameResults?: any;
+  onGameResultsChange?: (results: any) => void;
 }
 
 interface GameState {
@@ -26,7 +28,7 @@ interface GameState {
   dealerIndex: number;
 }
 
-export default function SeotdaGame({ roomId, socket, room }: SeotdaGameProps) {
+export default function SeotdaGame({ roomId, socket, room, gameResults: externalGameResults, onGameResultsChange }: SeotdaGameProps) {
   const { user } = useAuthStore();
   const [gameState, setGameState] = useState<GameState>({
     phase: 'betting',
@@ -43,10 +45,28 @@ export default function SeotdaGame({ roomId, socket, room }: SeotdaGameProps) {
   const [myCards, setMyCards] = useState<Card[]>([]);
   const [revealedCards, setRevealedCards] = useState<Record<string, Card[]>>({});
   const [partiallyRevealedCards, setPartiallyRevealedCards] = useState<Record<string, Card>>({}); // 각 플레이어가 공개한 카드 1장
-  const [gameResults, setGameResults] = useState<any>(null);
+  const [gameResults, setGameResults] = useState<any>(externalGameResults || null);
   const [selectedCards, setSelectedCards] = useState<Card[]>([]); // 쇼다운에서 선택한 2장
   const [cardsSelected, setCardsSelected] = useState(false); // 카드 선택 완료 여부
   const [revealCardSelected, setRevealCardSelected] = useState<Card | null>(null); // 게임 시작 시 선택한 공개 카드
+  
+  // 외부 gameResults가 변경되면 내부 state도 업데이트
+  useEffect(() => {
+    if (externalGameResults !== undefined) {
+      setGameResults(externalGameResults);
+    }
+  }, [externalGameResults]);
+  
+  // 내부 gameResults 변경 시 외부로 전달
+  const updateGameResults = (results: any) => {
+    setGameResults(results);
+    if (onGameResultsChange) {
+      console.log('SeotdaGame: onGameResultsChange 호출:', results);
+      onGameResultsChange(results);
+    } else {
+      console.warn('SeotdaGame: onGameResultsChange가 없습니다');
+    }
+  };
   
   // 이미지 사용 여부 (이미지 파일이 있으면 true로 변경)
   const useCardImages = true; // 이미지 파일 추가 완료
@@ -61,7 +81,7 @@ export default function SeotdaGame({ roomId, socket, room }: SeotdaGameProps) {
       if (data.gameState) {
         // 새로운 게임 시작 시 게임 결과 초기화
         if (data.gameState.phase === 'initial') {
-          setGameResults(null);
+          updateGameResults(null);
           setRevealedCards({});
           setPartiallyRevealedCards({});
           setSelectedCards([]);
@@ -131,10 +151,30 @@ export default function SeotdaGame({ roomId, socket, room }: SeotdaGameProps) {
         }
         // 재경기 알림 표시
         alert(data.action?.message || '구사로 인한 무승부! 재경기를 시작합니다.');
+        
+        // 재경기 시작 시 상태 초기화
+        setSelectedCards([]);
+        setCardsSelected(false);
+        setRevealCardSelected(null);
+        setRevealedCards({});
+        setPartiallyRevealedCards({});
+        
+        // gameState 업데이트
+        if (data.gameState) {
+          setGameState((prev) => ({
+            ...prev,
+            ...data.gameState,
+            phase: data.gameState.phase || 'betting',
+          }));
+        }
+        
+        // myCards는 game:state 이벤트에서 업데이트됨
       } else if (data.action?.type === 'showdown-start') {
         // 쇼다운 시작
+        console.log('쇼다운 시작 이벤트 수신:', data);
         setSelectedCards([]);
         setCardsSelected(false); // 선택 상태 초기화
+        
         // gameState 업데이트 보장
         if (data.gameState) {
           setGameState((prev) => ({
@@ -142,6 +182,12 @@ export default function SeotdaGame({ roomId, socket, room }: SeotdaGameProps) {
             ...data.gameState,
             phase: 'showdown', // 명시적으로 쇼다운 단계 설정
           }));
+        }
+        
+        // myCards가 3장인지 확인 (재경기 후 2번째 라운드 쇼다운)
+        console.log('쇼다운 시작 시 myCards:', myCards.length, myCards);
+        if (myCards.length !== 3) {
+          console.warn('쇼다운 시작 시 myCards가 3장이 아닙니다:', myCards.length);
         }
       } else if (data.action?.type === 'cards-selected') {
         // 다른 플레이어가 카드 선택 완료 또는 자신이 선택 완료
@@ -171,7 +217,7 @@ export default function SeotdaGame({ roomId, socket, room }: SeotdaGameProps) {
         }));
         
         // 게임 결과 설정
-        setGameResults({
+        updateGameResults({
           results: results.map((r: any) => ({
             userId: r.userId || r.userId?.toString(),
             username: r.username,
@@ -205,12 +251,38 @@ export default function SeotdaGame({ roomId, socket, room }: SeotdaGameProps) {
             revealed[result.userId] = result.cards;
           });
           setRevealedCards(revealed);
-          setGameResults({
-            results,
-            winner: data.action?.winnerId || data.winnerId || data.winner,
+          
+          // results에 username 추가 (GameRoom에서 표시하기 위해)
+          const resultsWithUsername = results.map((r: any) => {
+            if (!r.username) {
+              const player = room.players.find((p: Player) => String(p.userId) === String(r.userId));
+              return {
+                ...r,
+                username: player?.username || String(r.userId),
+              };
+            }
+            return r;
+          });
+          
+          const winnerId = data.action?.winnerId || data.winnerId || data.winner;
+          updateGameResults({
+            results: resultsWithUsername.map((r: any) => ({
+              userId: String(r.userId),
+              username: r.username || String(r.userId),
+              description: r.description || (String(r.userId) === String(winnerId) ? '승리' : '패배'),
+            })),
+            winner: winnerId,
             pot: data.action?.pot || data.pot || gameState.pot,
+            reason: '게임 종료',
             moneyChanges: data.action?.moneyChanges || data.moneyChanges,
           });
+          
+          console.log('SeotdaGame: 게임 결과 업데이트 완료:', {
+            resultsCount: resultsWithUsername.length,
+            winnerId,
+            pot: data.action?.pot || data.pot || gameState.pot,
+          });
+          
           // 게임 종료 상태 업데이트
           setGameState((prev) => ({
             ...prev,
@@ -338,58 +410,9 @@ export default function SeotdaGame({ roomId, socket, room }: SeotdaGameProps) {
     }
   };
 
-  // 방 상태가 WAITING이고 게임이 종료되지 않았으면 null 반환 (대기실은 부모에서 처리)
-  // 게임 종료 결과는 표시해야 하므로, WAITING 상태일 때는 게임 결과만 표시
-  if (room.status === GameRoomStatus.WAITING && gameState.phase !== 'finished') {
+  // 방 상태가 WAITING이면 null 반환 (대기실과 게임 결과는 부모에서 처리)
+  if (room.status === GameRoomStatus.WAITING) {
     return null;
-  }
-
-  // WAITING 상태이고 게임이 종료되었을 때는 게임 결과만 표시
-  if (room.status === GameRoomStatus.WAITING && gameState.phase === 'finished') {
-    return (
-      <div className="mt-6">
-        {gameResults && (
-          <div className="mb-6 p-4 bg-yellow-50 border-2 border-yellow-500 rounded-lg">
-            <h3 className="text-xl font-bold mb-2">게임 결과</h3>
-            <div className="space-y-2">
-              {gameResults.results?.map((result: any, idx: number) => {
-                const player = room.players.find((p: Player) => p.userId === result.userId || p.username === result.username);
-                return (
-                  <div key={idx} className={`p-2 rounded ${result.userId === gameResults.winner ? 'bg-green-100 font-bold' : 'bg-gray-100'}`}>
-                    {player?.username}: {result.description}
-                    {result.userId === gameResults.winner && ' 🏆 승리!'}
-                  </div>
-                );
-              })}
-            </div>
-            <div className="mt-4 text-lg font-semibold">
-              승자: {room.players.find((p: Player) => p.userId === gameResults.winner || p.username === gameResults.winner)?.username}
-              <br />
-              판돈: {formatSeotdaMoney(gameResults.pot || 0)}
-            </div>
-            {(() => {
-              const isHost = typeof room.hostId === 'object' && room.hostId !== null
-                ? (room.hostId as { username: string }).username === user?.username 
-                : String(room.hostId) === user?.id;
-              return isHost && (
-                <div className="mt-4">
-                  <button
-                    onClick={() => {
-                      if (socket) {
-                        socket.emit('game:start', roomId);
-                      }
-                    }}
-                    className="w-full py-2 px-4 bg-purple-600 text-white rounded-md font-semibold hover:bg-purple-700"
-                  >
-                    다음 게임 시작
-                  </button>
-                </div>
-              );
-            })()}
-          </div>
-        )}
-      </div>
-    );
   }
 
   return (

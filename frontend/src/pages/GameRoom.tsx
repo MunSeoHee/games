@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { io, Socket } from 'socket.io-client';
 import api from '../services/api';
@@ -40,6 +40,13 @@ export default function GameRoom() {
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState('');
   const [loading, setLoading] = useState(true);
+  const [gameResults, setGameResults] = useState<any>(null);
+  const roomRef = useRef<GameRoom | null>(null);
+  
+  // room 상태가 변경될 때마다 ref 업데이트
+  useEffect(() => {
+    roomRef.current = room;
+  }, [room]);
 
   useEffect(() => {
     if (!roomId || !token) return;
@@ -72,6 +79,9 @@ export default function GameRoom() {
       };
       
       console.log('방 상태 설정:', updatedRoomData.status, updatedRoomData.gameType);
+      
+      // WAITING 상태로 변경될 때 gameResults를 초기화하지 않음 (게임 결과 유지)
+      // gameResults는 game:started 이벤트에서만 초기화
       setRoom(updatedRoomData);
     });
 
@@ -83,6 +93,82 @@ export default function GameRoom() {
       // 게임 시작 이벤트 처리
       // room:update 이벤트가 이미 방 상태를 업데이트하므로 여기서는 로그만 남김
       console.log('게임 시작 이벤트 수신:', data);
+      // 새로운 게임 시작 시 게임 결과 초기화
+      setGameResults(null);
+    });
+
+    newSocket.on('game:action', (data: any) => {
+      // 모든 game:action 이벤트 로깅
+      console.log('GameRoom: game:action 이벤트 수신:', data.action?.type, data);
+      
+      // 게임 종료 이벤트 처리 (game-end 또는 reveal)
+      if (data.action?.type === 'game-end' || data.action?.type === 'reveal') {
+        console.log('게임 종료 이벤트 수신:', data.action?.type, data);
+        
+        // winnerId는 action에서 가져오거나, data에서 직접 가져오기
+        const winnerId = data.action?.winnerId || data.winnerId || data.winner;
+        
+        // results는 action.results 또는 data.results에서 가져오기
+        let results = data.action?.results || data.results || [];
+        
+        // results가 없으면 room 상태를 참조하여 생성
+        if (!results || results.length === 0) {
+          setRoom((currentRoom) => {
+            if (currentRoom && winnerId) {
+              results = currentRoom.players.map((p: Player) => ({
+                userId: p.userId.toString(),
+                username: p.username,
+                description: String(p.userId) === String(winnerId) ? '승리' : '패배',
+              }));
+            }
+            return currentRoom;
+          });
+        }
+        
+        // 게임 결과 설정 (room 상태와 독립적으로 유지)
+        if ((results && results.length > 0) || winnerId) {
+          // username이 없는 경우 roomRef에서 찾기 (동기적으로 처리)
+          const currentRoom = roomRef.current;
+          const finalResults = results.map((r: any) => {
+            if (!r.username && currentRoom) {
+              const player = currentRoom.players.find((p: Player) => String(p.userId) === String(r.userId));
+              return {
+                ...r,
+                username: player?.username || String(r.userId),
+              };
+            }
+            return r;
+          });
+          
+          setGameResults({
+            results: finalResults.map((r: any) => ({
+              userId: String(r.userId),
+              username: r.username || String(r.userId),
+              description: r.description || (String(r.userId) === String(winnerId) ? '승리' : '패배'),
+            })),
+            winner: winnerId,
+            pot: data.gameState?.pot || data.pot || 0,
+            reason: data.action?.reason || '게임 종료',
+          });
+          
+          console.log('게임 결과 설정 완료:', {
+            eventType: data.action?.type,
+            resultsCount: finalResults.length,
+            winnerId,
+            pot: data.gameState?.pot || data.pot || 0,
+            gameResults: {
+              results: finalResults.map((r: any) => ({
+                userId: String(r.userId),
+                username: r.username,
+                description: r.description,
+              })),
+              winner: winnerId,
+            },
+          });
+        } else {
+          console.warn('게임 종료 이벤트에 results나 winnerId가 없습니다:', data);
+        }
+      }
     });
 
     newSocket.on('error', (error: { message: string }) => {
@@ -296,8 +382,40 @@ export default function GameRoom() {
                     </div>
                   )}
                 </div>
-                {/* 게임 종료 결과 표시 (SeotdaGame에서 null을 반환하지 않도록) */}
-                {room.gameType === GameType.SEOTDA && socket && (
+                {/* 게임 종료 결과 표시 */}
+                {gameResults && (
+                  <div className="mt-6 bg-white rounded-lg shadow-md p-6">
+                    <div className="mb-6 p-4 bg-yellow-50 border-2 border-yellow-500 rounded-lg">
+                      <h3 className="text-xl font-bold mb-2">게임 결과</h3>
+                      <div className="space-y-2">
+                        {gameResults.results?.map((result: any, idx: number) => {
+                          const player = room.players.find((p: Player) => {
+                            const pUserId = String(p.userId);
+                            const rUserId = String(result.userId);
+                            return pUserId === rUserId || p.username === result.username;
+                          });
+                          return (
+                            <div key={idx} className={`p-2 rounded ${String(result.userId) === String(gameResults.winner) ? 'bg-green-100 font-bold' : 'bg-gray-100'}`}>
+                              {player?.username || result.username}: {result.description}
+                              {String(result.userId) === String(gameResults.winner) && ' 🏆 승리!'}
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <div className="mt-4 text-lg font-semibold">
+                        승자: {room.players.find((p: Player) => {
+                          const pUserId = String(p.userId);
+                          const wUserId = String(gameResults.winner);
+                          return pUserId === wUserId || p.username === gameResults.winner;
+                        })?.username || gameResults.winner}
+                        <br />
+                        판돈: {formatSeotdaMoney(gameResults.pot || 0)}
+                      </div>
+                    </div>
+                  </div>
+                )}
+                {/* SeotdaGame 컴포넌트는 PLAYING 상태일 때만 렌더링 */}
+                {room.gameType === GameType.SEOTDA && socket && room.status === GameRoomStatus.PLAYING && (
                   <SeotdaGame roomId={roomId!} socket={socket} room={{
                     id: room._id,
                     hostId: typeof room.hostId === 'string' ? room.hostId : String(room.hostId),
@@ -310,7 +428,7 @@ export default function GameRoom() {
                     gameType: room.gameType,
                     status: room.status,
                     createdAt: new Date()
-                  }} />
+                  }} gameResults={gameResults} onGameResultsChange={setGameResults} />
                 )}
               </div>
             ) : room.status === GameRoomStatus.PLAYING && room.gameType === GameType.SEOTDA ? (
@@ -327,7 +445,7 @@ export default function GameRoom() {
                   gameType: room.gameType,
                   status: room.status,
                   createdAt: new Date()
-                }} />
+                }} gameResults={gameResults} onGameResultsChange={setGameResults} />
               ) : (
                 <div className="bg-white rounded-lg shadow-md p-6">
                   <div className="text-center text-gray-500">소켓 연결 중...</div>
