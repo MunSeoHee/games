@@ -2,6 +2,14 @@ name: Deploy to Server
 
 on:
   workflow_dispatch:  # 수동 실행만 가능
+    inputs:
+      environment:
+        description: '배포 환경'
+        required: false
+        default: 'production'
+        type: choice
+        options:
+          - production
 
 jobs:
   deploy:
@@ -22,30 +30,51 @@ jobs:
             frontend/package-lock.json
         continue-on-error: true  # 캐시 실패해도 계속 진행
 
+      # ============================================
       # 백엔드 빌드
+      # ============================================
       - name: Install backend dependencies
         run: |
+          echo "=== 백엔드 의존성 설치 시작 ==="
           cd backend
           npm install
+          echo "=== 백엔드 의존성 설치 완료 ==="
 
       - name: Build backend
         run: |
+          echo "=== 백엔드 빌드 시작 ==="
           cd backend
           npm run build
+          echo "=== 백엔드 빌드 완료 ==="
+          echo "빌드 결과 확인:"
+          ls -la dist/ || echo "⚠ dist 폴더가 없습니다"
 
+      # ============================================
       # 프론트엔드 빌드
+      # ============================================
       - name: Install frontend dependencies
         run: |
+          echo "=== 프론트엔드 의존성 설치 시작 ==="
           cd frontend
           npm install
+          echo "=== 프론트엔드 의존성 설치 완료 ==="
 
       - name: Build frontend
         env:
           VITE_API_URL: ${{ secrets.VITE_API_URL }}
           VITE_SOCKET_URL: ${{ secrets.VITE_SOCKET_URL }}
         run: |
+          echo "=== 프론트엔드 빌드 시작 ==="
+          echo "환경 변수 확인:"
+          echo "VITE_API_URL: ${VITE_API_URL:-'설정되지 않음'}"
+          echo "VITE_SOCKET_URL: ${VITE_SOCKET_URL:-'설정되지 않음'}"
           cd frontend
           npm run build
+          echo "=== 프론트엔드 빌드 완료 ==="
+          echo "빌드 결과 확인:"
+          ls -la dist/ || echo "⚠ dist 폴더가 없습니다"
+          echo "빌드된 파일 개수:"
+          find dist -type f | wc -l || echo "0"
 
       # 서버에 배포
       - name: Deploy backend files
